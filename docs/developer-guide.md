@@ -273,6 +273,7 @@ aegra/
 ├── src/agent_server/          # Main application code
 │   ├── core/database.py       # Database connection
 │   ├── api/                   # API endpoints
+│   ├── services/              # Core services (LangGraph, etc.)
 │   └── models/                # Data models
 ├── scripts/
 │   └── migrate.py             # Migration helper script
@@ -282,6 +283,44 @@ aegra/
 ├── alembic.ini                # Alembic configuration
 └── docker compose.yml         # Database setup
 ```
+
+## 🔄 LangGraph Service Architecture
+
+The `LangGraphService` is the core component that manages graph loading, caching, and execution.
+
+### Design Principles
+
+1. **Cache base graphs, not execution instances**: We cache the compiled graph structure (without checkpointer/store) for fast loading
+2. **Fresh copies per-request**: Each execution gets a fresh graph copy with checkpointer/store injected
+3. **Thread-safe by design**: No locks needed because cached state is immutable
+
+### Usage Patterns
+
+**For graph execution** (runs, state operations):
+```python
+# Use context manager - yields fresh graph with checkpointer/store
+async with langgraph_service.get_graph(graph_id) as graph:
+    async for event in graph.astream(input, config):
+        ...
+```
+
+**For validation/schema extraction** (no execution needed):
+```python
+# Use simple async method - returns base graph without checkpointer/store
+graph = await langgraph_service.get_graph_for_validation(graph_id)
+schemas = extract_schemas(graph)
+```
+
+### Why This Pattern?
+
+| Old Pattern (with locks) | New Pattern (context manager) |
+|-------------------------|------------------------------|
+| Single cached instance with checkpointer | Fresh copy per request |
+| Needed locks for concurrent access | Thread-safe by design |
+| Potential race conditions | No race conditions possible |
+| More complex error handling | Simple, predictable behavior |
+
+Each request gets its own graph copy, ensuring isolation and thread-safety.
 
 ## 🔍 Understanding Migration Files
 
@@ -321,6 +360,16 @@ def downgrade() -> None:
 - **downgrade()**: What to do when rolling back the migration
 
 ## 🚨 Common Issues & Solutions
+
+### Database Version Upgrade (Postgres 15 -> 18)
+
+**Problem**: Container fails with `FATAL: database files are incompatible with server`
+
+This happens because we upgraded to PostgreSQL 18, but your Docker volume still contains data formatted for PostgreSQL 15.
+
+**Solution**:
+You need to remove the old volume and (optionally) restore your data.
+Please follow the **[PostgreSQL 18 Migration Guide](postgres-18-migration.md)**.
 
 ### Migration Issues in Docker
 
@@ -622,8 +671,9 @@ python3 scripts/migrate.py upgrade
 
 ### Troubleshooting Quick Reference
 
-| Problem                   | Solution                              |
-| ------------------------- | ------------------------------------- |
+| Problem                   | Solution                                                                        |
+| ------------------------- | ------------------------------------------------------------------------------- |
+| **Incompatible DB version** | **See [PostgreSQL 18 Migration Guide](postgres-18-migration.md)** |
 | Can't connect to database | `docker compose up postgres -d`       |
 | Migration fails           | `python3 scripts/migrate.py current`  |
 | Permission denied         | `chmod +x scripts/migrate.py`         |
